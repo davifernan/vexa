@@ -9,6 +9,7 @@ import config
 from stt.provider import TranscriptSegment
 from state.shared_state import SharedState
 from state.transcript_manager import TranscriptManager
+from state.monolog import Monolog, AgentMessage
 from .quick_ack import QuickAck
 
 logger = logging.getLogger("meeting_intelligence.watcher")
@@ -55,18 +56,23 @@ class Watcher:
         quick_ack: QuickAck,
         shared_state: SharedState,
         transcript_manager: TranscriptManager,
+        monolog: Monolog,
         deep_agent_trigger_fn=None,
+        classifier_llm=None,
     ):
         self.keywords = [kw.lower() for kw in keywords]
         self.quick_ack = quick_ack
         self.shared_state = shared_state
         self.transcript_manager = transcript_manager
+        self.monolog = monolog
         self._deep_agent_trigger = deep_agent_trigger_fn
+        self._classifier_llm = classifier_llm
         self.buffer = RollingBuffer(window_seconds=30)
         self._running = False
         self._last_classify_time = 0.0
         self._last_trigger_time = 0.0
         self._cooldown_seconds = 5.0  # Don't re-trigger within 5s
+        self._classify_interval = config.WATCHER_CLASSIFY_INTERVAL_S
 
     async def on_segment(self, segment: TranscriptSegment) -> None:
         """Called for every transcript segment from STT. Main entry point."""
@@ -91,11 +97,24 @@ class Watcher:
             await self._fire_trigger(segment, reason="keyword")
             return
 
-        # 2. Optional periodic LLM classifier
-        # (not implemented in MVP — add later if keyword matching isn't enough)
+        # 2. Periodic semantic classifier (Mini-LLM, every N seconds)
+        if self._classifier_llm and (now - self._last_classify_time) >= self._classify_interval:
+            self._last_classify_time = now
+            asyncio.create_task(self._semantic_classify())
 
     async def _fire_trigger(self, segment: TranscriptSegment, reason: str) -> None:
         """Fire Quick-Ack + Deep Agent in parallel. Non-blocking."""
+        task_id = self.monolog.new_task_id()
+
+        # Log to monolog
+        asyncio.create_task(self.monolog.publish(AgentMessage(
+            from_agent="watcher",
+            type="trigger",
+            content=f"{reason}: \"{segment.text[:80]}\"",
+            task_id=task_id,
+        )))
+
+        # Quick-Ack + Deep Agent in parallel
         tasks = [
             asyncio.create_task(
                 self.quick_ack.respond(segment.text, channel="chat")
@@ -109,9 +128,52 @@ class Watcher:
                 )
             )
 
-        # Don't await — fire and forget
         for task in tasks:
             task.add_done_callback(self._task_done_callback)
+
+    async def _semantic_classify(self) -> None:
+        """Periodic semantic classification — catches triggers without keywords."""
+        try:
+            instructions = await self.shared_state.get_instructions()
+            buffer_text = self.buffer.get_text()
+            if not buffer_text.strip():
+                return
+
+            resp = await self._classifier_llm.generate(
+                system=(
+                    "Du bist ein Meeting-Monitor. Klassifiziere ob der Meeting-Assistent "
+                    "reagieren sollte. Antworte NUR mit einem Wort: TRIGGER, OBSERVE, oder IGNORE.\n"
+                    "TRIGGER: Jemand stellt eine Frage an die Runde oder braucht Hilfe.\n"
+                    "OBSERVE: Interessante Information, merken fuer spaeter.\n"
+                    "IGNORE: Normales Gespraech, nichts zu tun."
+                ),
+                prompt=(
+                    f"Letzte 30 Sekunden:\n{buffer_text}\n\n"
+                    f"Instruktionen: {instructions or 'keine'}\n\n"
+                    f"Klassifizierung:"
+                ),
+                max_tokens=5,
+            )
+
+            result = resp.text.strip().upper()
+
+            if "TRIGGER" in result:
+                logger.info(f"Semantic trigger detected: {buffer_text[-60:]}")
+                # Create a synthetic segment for the trigger
+                last_segments = self.buffer.get_last_n(1)
+                if last_segments:
+                    self._last_trigger_time = time.time()
+                    await self._fire_trigger(last_segments[0], reason="semantic")
+
+            elif "OBSERVE" in result:
+                await self.monolog.publish(AgentMessage(
+                    from_agent="watcher",
+                    type="observation",
+                    content=buffer_text[-200:],
+                ))
+
+        except Exception as e:
+            logger.error(f"Semantic classify failed: {e}")
 
     def _keyword_match(self, text: str) -> bool:
         text_lower = text.lower()

@@ -25,6 +25,7 @@ from agents.watcher import Watcher
 from agents.quick_ack import QuickAck
 from agents.deep_agent import DeepAgent
 from tools.meeting_tools import create_meeting_tools
+from state.monolog import Monolog
 
 # Logging
 logging.basicConfig(
@@ -53,6 +54,7 @@ class MeetingSession:
         self.transcript_manager = TranscriptManager(
             redis_client, meeting_id, window_seconds=config.LIVE_WINDOW_SECONDS,
         )
+        self.monolog = Monolog(redis_client, meeting_id)
 
         # Actions
         self.action_queue = ActionQueue(vexa_client)
@@ -87,7 +89,9 @@ class MeetingSession:
             quick_ack=self.quick_ack,
             shared_state=self.shared_state,
             transcript_manager=self.transcript_manager,
+            monolog=self.monolog,
             deep_agent_trigger_fn=self.deep_agent.trigger,
+            classifier_llm=llm_providers.get("quick"),  # Haiku for semantic classify
         )
 
         # STT

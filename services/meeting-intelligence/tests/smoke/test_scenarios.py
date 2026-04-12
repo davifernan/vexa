@@ -23,9 +23,16 @@ def get_all_scenarios() -> list[str]:
     return sorted(f.name for f in SCENARIOS_DIR.glob("*.yaml"))
 
 
+def _could_trigger(text: str, keywords: list[str] = None) -> bool:
+    """Check if a segment text could trigger the Watcher."""
+    keywords = keywords or ["nilo", "hey nilo"]
+    return any(kw in text.lower() for kw in keywords)
+
+
 async def play_scenario(session, scenario: dict) -> dict:
     """Play a scenario through the session and collect results.
 
+    Waits longer after trigger segments (Claude CLI needs ~15-20s).
     Returns a report dict with what happened.
     """
     segments = scenario.get("segments", [])
@@ -45,19 +52,31 @@ async def play_scenario(session, scenario: dict) -> dict:
         )
         results["segments_played"] += 1
 
-        # Small delay to let async agents react
-        await asyncio.sleep(0.3)
+        is_trigger = _could_trigger(seg["says"])
 
-        # Check if new actions appeared
+        if is_trigger:
+            # Wait for Quick-Ack + Deep Agent (Claude CLI ~15-20s)
+            await session.collector.wait_for_actions(
+                count=len(results["actions"]) + 1,
+                timeout=30.0,
+            )
+        else:
+            # Small delay for non-trigger segments
+            await asyncio.sleep(0.3)
+
+        # Collect new actions
         new_actions = session.collector.actions[len(results["actions"]):]
         if new_actions:
             for action in new_actions:
                 results["action_after_segment"][i] = action
             results["actions"].extend(new_actions)
 
-    # Final wait for any remaining async responses
-    await asyncio.sleep(5.0)
-    remaining = session.collector.actions[len(results["actions"]):]
+    # Final wait for any remaining async responses (Deep Agent may still be running)
+    final_actions = await session.collector.wait_for_actions(
+        count=len(results["actions"]) + 1,
+        timeout=25.0,
+    )
+    remaining = final_actions[len(results["actions"]):]
     results["actions"].extend(remaining)
 
     results["end_time"] = time.time()

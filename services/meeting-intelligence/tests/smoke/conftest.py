@@ -21,6 +21,7 @@ from agents.quick_ack import QuickAck
 from agents.deep_agent import DeepAgent
 from llm.provider import create_provider_stack
 from tools.meeting_tools import create_meeting_tools
+from state.monolog import Monolog
 
 logger = logging.getLogger("test")
 
@@ -133,6 +134,9 @@ class TestMeetingSession:
         self.action_queue = ActionQueue(self._mock_vexa)
         self.collector = ActionCollector(self.action_queue)
 
+        # Monolog (agent-to-agent communication)
+        self.monolog = Monolog(self._redis, self.meeting_id)
+
         # Tools — defined once, auto-converted per provider
         self.tool_dispenser = create_meeting_tools(
             shared_state=self.shared_state,
@@ -165,6 +169,7 @@ class TestMeetingSession:
             quick_ack=self.quick_ack,
             shared_state=self.shared_state,
             transcript_manager=self.transcript_manager,
+            monolog=self.monolog,
             deep_agent_trigger_fn=self.deep_agent.trigger,
         )
 

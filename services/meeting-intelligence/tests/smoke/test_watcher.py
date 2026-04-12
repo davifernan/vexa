@@ -16,8 +16,8 @@ async def test_keyword_nilo_triggers_quick_ack(session):
         timestamp=90.0,
     )
 
-    action = await session.collector.wait_for_action(timeout=10.0)
-    assert action is not None, "No Quick-Ack response within 10s"
+    action = await session.collector.wait_for_action(timeout=30.0)
+    assert action is not None, "No Quick-Ack response within 30s"
     assert isinstance(action, ChatAction), f"Expected ChatAction, got {type(action).__name__}"
     assert len(action.text) > 0, "Quick-Ack text is empty"
     assert len(action.text.split()) <= 20, f"Quick-Ack too long: {action.text}"
