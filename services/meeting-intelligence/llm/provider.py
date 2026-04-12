@@ -60,10 +60,15 @@ class ClaudeCliProvider(LLMProvider):
 
     Calls `claude` CLI with --print flag. Requires claude to be installed
     and authenticated (Max subscription or Claude Code).
+
+    For tool calls: uses --mcp-config to load a Meeting Intelligence MCP server
+    that provides the 7 focused tools. Claude CLI runs the agentic loop itself —
+    it makes tool calls, gets results, thinks more, and returns the final output.
     """
 
-    def __init__(self, default_model: str = "sonnet"):
+    def __init__(self, default_model: str = "sonnet", mcp_config: Optional[dict] = None):
         self._default_model = default_model
+        self._mcp_config = mcp_config
         self._available: Optional[bool] = None
 
     @property
@@ -109,8 +114,72 @@ class ClaudeCliProvider(LLMProvider):
         self, system: str, messages: list, tools: list,
         max_tokens: int = 2000, model: Optional[str] = None,
     ) -> dict:
-        # CLI doesn't support tool calls natively — fall through to API
-        raise NotImplementedError("Claude CLI does not support tool calls. Use API provider.")
+        """Run Claude CLI with MCP tools — Claude handles the agentic loop itself.
+
+        The MCP server provides the tools. Claude CLI calls them, gets results,
+        thinks, calls more tools if needed, and returns the final text output.
+        We don't need to manually handle tool_use/tool_result — Claude does it all.
+        """
+        if not self._mcp_config:
+            raise RuntimeError("Claude CLI generate_with_tools requires mcp_config")
+
+        model = model or self._default_model
+
+        # Build the full prompt from system + messages
+        user_content = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                content = msg["content"]
+                if isinstance(content, list):
+                    content = "\n".join(
+                        block.get("content", block.get("text", ""))
+                        for block in content if isinstance(block, dict)
+                    )
+                user_content += content + "\n"
+
+        full_prompt = f"{system}\n\n---\n\n{user_content}" if system else user_content
+
+        # Write MCP config to temp file
+        import tempfile
+        mcp_config_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, prefix="mcp-meeting-"
+        )
+        json.dump(self._mcp_config, mcp_config_file)
+        mcp_config_file.close()
+
+        try:
+            cmd = [
+                "claude", "--print",
+                "--dangerously-skip-permissions",
+                "--model", model,
+                "--mcp-config", mcp_config_file.name,
+                "-p", full_prompt,
+            ]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+            if proc.returncode != 0:
+                err = stderr.decode()[:300]
+                logger.warning(f"Claude CLI with tools failed (rc={proc.returncode}): {err}")
+                raise RuntimeError(f"Claude CLI failed: {err}")
+
+            text = stdout.decode().strip()
+
+            # Claude CLI already executed all tool calls and returned final output.
+            # We return it as a completed response (no more tool calls needed).
+            return {
+                "content": [{"type": "text", "text": text}],
+                "stop_reason": "end_turn",
+                "model": f"claude-cli/{model}",
+            }
+
+        finally:
+            os.unlink(mcp_config_file.name)
 
 
 class AnthropicApiProvider(LLMProvider):
@@ -223,6 +292,29 @@ class OpenAiApiProvider(LLMProvider):
         }
 
 
+def _build_mcp_config() -> dict:
+    """Build MCP config for Claude CLI — points to our Meeting Intelligence MCP server."""
+    import pathlib
+    mcp_server_path = str(pathlib.Path(__file__).parent.parent / "mcp_server.py")
+
+    return {
+        "mcpServers": {
+            "meeting-intelligence": {
+                "command": "python3",
+                "args": [mcp_server_path],
+                "env": {
+                    "REDIS_URL": os.getenv("REDIS_URL", "redis://localhost:6379/1"),
+                    "MEETING_ID": os.getenv("MEETING_ID", ""),
+                    "VEXA_API_URL": os.getenv("VEXA_API_URL", "http://localhost:8056"),
+                    "VEXA_API_KEY": os.getenv("VEXA_API_KEY", ""),
+                    "MEETING_PLATFORM": os.getenv("MEETING_PLATFORM", "google_meet"),
+                    "NATIVE_MEETING_ID": os.getenv("NATIVE_MEETING_ID", ""),
+                },
+            },
+        },
+    }
+
+
 def create_provider_stack() -> dict[str, LLMProvider]:
     """Create available providers in priority order.
 
@@ -241,8 +333,11 @@ def create_provider_stack() -> dict[str, LLMProvider]:
         logger.info("Claude CLI available — using Max subscription ($0)")
         providers["quick"] = ClaudeCliProvider(default_model="haiku")
         providers["summarizer"] = ClaudeCliProvider(default_model="haiku")
-        # Deep Agent needs tool calls — CLI doesn't support them
-        # So we still need API for deep agent
+
+        # Deep Agent with MCP tools — Claude CLI handles the agentic loop!
+        mcp_config = _build_mcp_config()
+        providers["deep"] = ClaudeCliProvider(default_model="sonnet", mcp_config=mcp_config)
+        logger.info("Deep Agent: Claude CLI + MCP tools ($0)")
     else:
         logger.info("Claude CLI not available — using API providers")
 
@@ -261,6 +356,7 @@ def create_provider_stack() -> dict[str, LLMProvider]:
     if openai_key:
         oai = OpenAiApiProvider(openai_key, "gpt-4o-mini")
         providers.setdefault("quick", oai)  # gpt-4o-mini has fast TTFT
+        providers.setdefault("deep", OpenAiApiProvider(openai_key, "gpt-4o"))  # fallback for deep
         providers.setdefault("summarizer", oai)
         logger.info("OpenAI API configured")
 
@@ -271,9 +367,9 @@ def create_provider_stack() -> dict[str, LLMProvider]:
         )
 
     logger.info(
-        f"Provider stack: quick={providers.get('quick', {}).name}, "
-        f"deep={providers.get('deep', {}).name}, "
-        f"summarizer={providers.get('summarizer', {}).name}"
+        f"Provider stack: quick={providers['quick'].name if 'quick' in providers else 'none'}, "
+        f"deep={providers['deep'].name if 'deep' in providers else 'none'}, "
+        f"summarizer={providers['summarizer'].name if 'summarizer' in providers else 'none'}"
     )
 
     return providers

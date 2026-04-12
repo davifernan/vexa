@@ -3,11 +3,13 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import pytest
+import pytest_asyncio
 import redis.asyncio as aioredis
 
 from stt.provider import TranscriptSegment
@@ -112,6 +114,10 @@ class TestMeetingSession:
         self._redis = aioredis.from_url("redis://localhost:6379/1", decode_responses=False)
         await self._redis.flushdb()
 
+        # Set env vars for MCP server
+        os.environ["MEETING_ID"] = self.meeting_id
+        os.environ["REDIS_URL"] = "redis://localhost:6379/1"
+
         # LLM providers
         self.llm_providers = create_provider_stack()
 
@@ -188,14 +194,7 @@ class TestMeetingSession:
             await asyncio.sleep(delay)
 
 
-@pytest.fixture
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture
+@pytest_asyncio.fixture
 async def session():
     """Create a test meeting session with all agents wired up."""
     s = TestMeetingSession()
