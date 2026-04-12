@@ -1,0 +1,47 @@
+meta:
+  title: "Quick Standup — Basis-Test"
+  difficulty: easy
+  duration_minutes: 3
+  language: de
+  tags: [standup, trigger, quick-ack]
+  description: >
+    Kurzes Standup mit einem Trigger.
+    Testet ob Keyword-Detection und Quick-Ack funktionieren.
+
+participants:
+  - name: "Davi"
+  - name: "Max"
+
+segments:
+  - t: 0
+    who: "Davi"
+    says: "Morgen Max, kurzes Update?"
+
+  - t: 10
+    who: "Max"
+    says: "Ja, ich hab gestern den Auth-Service refactored. Laeuft jetzt deutlich schneller."
+
+  - t: 25
+    who: "Davi"
+    says: "Super. Gibt es noch offene Punkte?"
+
+  - t: 35
+    who: "Max"
+    says: "Nur die Tests muessen noch angepasst werden. Sollte heute fertig sein."
+
+  - t: 50
+    who: "Davi"
+    says: "Nilo, notier dir das bitte. Max passt heute die Tests an."
+
+expect:
+  - type: trigger
+    after_segment: 4
+    reason: "keyword 'Nilo'"
+
+  - type: quick_ack
+    after_segment: 4
+    max_latency_ms: 5000
+
+  - type: no_action
+    before_segment: 4
+    reason: "Kein Trigger vor Segment 4"

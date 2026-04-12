@@ -1,0 +1,47 @@
+meta:
+  title: "Stilles Meeting — Keine Trigger"
+  difficulty: easy
+  duration_minutes: 5
+  language: de
+  tags: [negative-test, no-trigger, quiet]
+  description: >
+    Ein ganzes Meeting ohne dass jemand Nilo anspricht.
+    Der Agent muss komplett still bleiben.
+
+participants:
+  - name: "Davi"
+  - name: "Max"
+  - name: "Lisa"
+
+segments:
+  - t: 0
+    who: "Davi"
+    says: "Morgen zusammen. Kurzes Update bitte."
+
+  - t: 10
+    who: "Max"
+    says: "Backend laeuft stabil. Keine Incidents diese Woche."
+
+  - t: 20
+    who: "Lisa"
+    says: "Frontend Release ist fuer Donnerstag geplant. Alles im Zeitplan."
+
+  - t: 35
+    who: "Davi"
+    says: "Sehr gut. Noch was von eurer Seite?"
+
+  - t: 45
+    who: "Max"
+    says: "Nein, alles klar soweit."
+
+  - t: 50
+    who: "Lisa"
+    says: "Bei mir auch nicht. Schoenen Tag euch."
+
+  - t: 55
+    who: "Davi"
+    says: "Alles klar, bis morgen dann."
+
+expect:
+  - type: no_action
+    reason: "Niemand hat Nilo angesprochen — keine Aktion erlaubt"
