@@ -1,7 +1,8 @@
 """Deep Agent — the curator of shared state and intelligent responder.
 
 Runs periodically (every 2 min) and on-demand when triggered.
-Uses Sonnet with full meeting context. Can make multiple tool-call turns.
+Uses the configured LLM provider with tools from ToolDispenser.
+Tools are defined once and auto-converted to the right format.
 """
 
 import asyncio
@@ -12,9 +13,10 @@ from typing import Optional
 
 import config
 from llm.provider import LLMProvider
+from tools.registry import ToolDispenser
 from state.shared_state import SharedState
 from state.transcript_manager import TranscriptManager
-from actions.queue import ActionQueue, ChatAction, SpeakAction, ScreenAction
+from actions.queue import ActionQueue, ChatAction, SpeakAction
 from stt.provider import TranscriptSegment
 
 logger = logging.getLogger("meeting_intelligence.deep_agent")
@@ -22,89 +24,30 @@ logger = logging.getLogger("meeting_intelligence.deep_agent")
 SYSTEM_PROMPT = """Du bist der Deep Agent eines Meeting-Assistenten namens Nilo.
 
 Deine Aufgabe:
-1. Den Shared State aktualisieren (context_summary, active_topics, action_items, agent_instructions)
+1. Den Shared State aktualisieren (update_state Tool)
 2. Auf Trigger reagieren (Fragen beantworten, Aufgaben erledigen)
 3. Entscheiden WIE du reagierst (Chat, Sprache, Zeichnung, Hand heben)
 
 Regeln:
 - Aktualisiere den State mit neuen Erkenntnissen aus dem Transcript
 - Beantworte Trigger-Anfragen praezise und kurz
-- Nutze Chat fuer Zitate, Listen, Links (liest man besser)
-- Nutze Sprache fuer kurze Antworten wenn jemand wartet
-- Hebe die Hand wenn du einen wichtigen Punkt hast aber nicht unterbrechen willst
+- Nutze send_chat fuer Zitate, Listen, Links (liest man besser)
+- Nutze bot_speak fuer kurze Antworten wenn jemand wartet
 - Halte agent_instructions aktuell — was sollte der Watcher als naechstes beachten?
 - Deutsch bitte, knapp und natuerlich"""
 
 
-TOOLS = [
-    {
-        "name": "update_state",
-        "description": "Aktualisiere den Shared State mit neuen Erkenntnissen. Felder: context_summary, active_topics, resolved_topics, action_items, agent_instructions.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "context_summary": {"type": "string", "description": "Aktualisierte Zusammenfassung des bisherigen Meetings"},
-                "active_topics": {"type": "array", "items": {"type": "string"}, "description": "Aktuelle Themen"},
-                "resolved_topics": {"type": "array", "items": {"type": "string"}, "description": "Abgeschlossene Themen"},
-                "action_items": {"type": "array", "items": {"type": "object"}, "description": "Action Items mit assignee, task, status"},
-                "agent_instructions": {"type": "string", "description": "Hinweise fuer den Watcher was als naechstes zu beachten ist"},
-            },
-        },
-    },
-    {
-        "name": "search_transcript",
-        "description": "Durchsuche das gesamte Meeting-Transcript nach einem Suchbegriff. Gibt passende Segmente mit Timestamps zurueck.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Suchbegriff"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "get_transcript_range",
-        "description": "Hole das rohe Transcript fuer einen Zeitraum (in Sekunden seit Meeting-Start).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "from_seconds": {"type": "number", "description": "Startzeit in Sekunden"},
-                "to_seconds": {"type": "number", "description": "Endzeit in Sekunden"},
-            },
-            "required": ["from_seconds", "to_seconds"],
-        },
-    },
-    {
-        "name": "send_chat",
-        "description": "Sende eine Chat-Nachricht ins Meeting. Nutze fuer: Zitate, Listen, Links, leise Vorschlaege.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "Die Chat-Nachricht"},
-            },
-            "required": ["text"],
-        },
-    },
-    {
-        "name": "speak",
-        "description": "Sage etwas im Meeting per TTS. Nutze fuer: kurze Antworten wenn jemand wartet.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "Was gesagt werden soll (kurz, max 2 Saetze)"},
-            },
-            "required": ["text"],
-        },
-    },
-]
-
-
 class DeepAgent:
-    """The brain — curates shared state and responds intelligently."""
+    """The brain — curates shared state and responds intelligently.
+
+    Uses ToolDispenser for provider-agnostic tool definitions.
+    Works with Claude CLI + MCP ($0), Anthropic API, or OpenAI API.
+    """
 
     def __init__(
         self,
         llm: LLMProvider,
+        tool_dispenser: ToolDispenser,
         shared_state: SharedState,
         transcript_manager: TranscriptManager,
         action_queue: ActionQueue,
@@ -112,6 +55,7 @@ class DeepAgent:
         meeting_id: str,
     ):
         self.llm = llm
+        self.tools = tool_dispenser
         self.state = shared_state
         self.transcript = transcript_manager
         self.action_queue = action_queue
@@ -151,7 +95,7 @@ class DeepAgent:
         })
 
     async def analyze(self, extra_context: Optional[dict] = None) -> None:
-        """Run a full analysis cycle with agentic tool-call loop."""
+        """Run a full analysis cycle."""
         self._busy = True
 
         try:
@@ -161,31 +105,61 @@ class DeepAgent:
             pending = await self.state.clear_pending_requests()
 
             user_message = self._build_prompt(state, live_window, summaries, pending, extra_context)
-
             messages = [{"role": "user", "content": user_message}]
 
-            # Agentic loop — multiple turns if tool calls needed
-            for turn in range(10):  # max 10 turns
+            # Get tools in the right format for this provider
+            provider_tools = self.tools.for_provider(self.llm.name)
+
+            if self.llm.name == "claude-cli":
+                # Claude CLI handles tool calls itself via MCP
+                # We just get the final text output back
                 response = await self.llm.generate_with_tools(
                     system=SYSTEM_PROMPT,
                     messages=messages,
-                    tools=TOOLS,
+                    tools=provider_tools,  # ignored for CLI, MCP server has them
                     max_tokens=2000,
                 )
+                # Log final output
+                content = response.get("content", [])
+                for block in (content if isinstance(content, list) else [content]):
+                    text = block.get("text", "") if isinstance(block, dict) else str(block)
+                    if text:
+                        logger.info(f"Deep agent (CLI): {text[:100]}")
 
-                # Process response
-                if response.get("stop_reason") == "tool_use":
-                    tool_results = await self._execute_tool_calls(response)
-                    messages.append({"role": "assistant", "content": response["content"]})
-                    messages.append({"role": "user", "content": tool_results})
-                else:
-                    # Final text response (if any)
-                    content = response.get("content", [])
-                    for block in (content if isinstance(content, list) else [content]):
-                        text = getattr(block, "text", None) or (block if isinstance(block, str) else None)
-                        if text:
-                            logger.info(f"Deep agent final: {str(text)[:100]}")
-                    break
+            else:
+                # API providers — we handle the agentic loop manually
+                for turn in range(10):
+                    response = await self.llm.generate_with_tools(
+                        system=SYSTEM_PROMPT,
+                        messages=messages,
+                        tools=provider_tools,
+                        max_tokens=2000,
+                    )
+
+                    stop = response.get("stop_reason", "")
+
+                    if stop == "tool_use":
+                        # Anthropic format
+                        tool_results = await self._handle_anthropic_tools(response)
+                        messages.append({"role": "assistant", "content": response["content"]})
+                        messages.append({"role": "user", "content": tool_results})
+
+                    elif stop == "stop" and self._has_openai_tool_calls(response):
+                        # OpenAI format
+                        tool_results = await self._handle_openai_tools(response)
+                        messages.append(response["content"])  # assistant message
+                        messages.extend(tool_results)  # tool result messages
+
+                    else:
+                        # Final response, no more tool calls
+                        content = response.get("content", [])
+                        for block in (content if isinstance(content, list) else [content]):
+                            text = getattr(block, "text", None) or (
+                                block.get("text", "") if isinstance(block, dict) else str(block)
+                            )
+                            if text:
+                                logger.info(f"Deep agent (API): {text[:100]}")
+                        break
 
         except Exception as e:
             logger.error(f"Deep agent analysis failed: {e}")
@@ -201,76 +175,50 @@ class DeepAgent:
             f"\n## Live Transcript (letzte 5 Min)\n{live_window}",
             f"\n## Bisherige Zusammenfassungen\n{summaries}",
         ]
-
         if pending:
             parts.append(f"\n## Offene Anfragen\n{json.dumps(pending, indent=2, ensure_ascii=False)}")
-
         if extra_context:
             parts.append(f"\n## Trigger\n{json.dumps(extra_context, indent=2, ensure_ascii=False)}")
-
         parts.append(
             "\n## Deine Aufgabe\n"
             "1. Aktualisiere den State (update_state Tool)\n"
             "2. Reagiere auf Trigger/Anfragen wenn vorhanden\n"
             "3. Entscheide ob Chat, Sprache, oder nichts"
         )
-
         return "\n".join(parts)
 
-    async def _execute_tool_calls(self, response) -> list:
-        """Execute tool calls and return results."""
+    # --- Anthropic tool call handling ---
+
+    async def _handle_anthropic_tools(self, response) -> list:
         results = []
-
-        for block in response.content:
-            if block.type != "tool_use":
+        for block in response.get("content", []):
+            if not (hasattr(block, "type") and block.type == "tool_use"):
                 continue
-
-            name = block.name
-            args = block.input
-            result = None
-
-            try:
-                if name == "update_state":
-                    updated = await self.state.update(args)
-                    result = f"State updated to v{updated['version']}"
-
-                elif name == "search_transcript":
-                    segments = await self.transcript.search(args["query"])
-                    result = json.dumps(segments[:10], ensure_ascii=False)
-
-                elif name == "get_transcript_range":
-                    segments = await self.transcript.get_range(
-                        args["from_seconds"], args["to_seconds"]
-                    )
-                    result = json.dumps(segments, ensure_ascii=False)
-
-                elif name == "send_chat":
-                    await self.action_queue.push(ChatAction(
-                        text=args["text"],
-                        platform=self.platform,
-                        meeting_id=self.meeting_id,
-                    ))
-                    result = "Chat message queued"
-
-                elif name == "speak":
-                    await self.action_queue.push(SpeakAction(
-                        text=args["text"],
-                        platform=self.platform,
-                        meeting_id=self.meeting_id,
-                    ))
-                    result = "Speech queued"
-
-                else:
-                    result = f"Unknown tool: {name}"
-
-            except Exception as e:
-                result = f"Tool error: {e}"
-                logger.error(f"Tool {name} failed: {e}")
-
+            result = await self.tools.execute(block.name, block.input)
             results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": str(result),
+                "content": result,
             })
-
         return results
+
+    # --- OpenAI tool call handling ---
+
+    def _has_openai_tool_calls(self, response) -> bool:
+        content = response.get("content")
+        if hasattr(content, "tool_calls"):
+            return bool(content.tool_calls)
+        return False
+
+    async def _handle_openai_tools(self, response) -> list:
+        messages = []
+        content = response["content"]
+        for tc in content.tool_calls:
+            args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
+            result = await self.tools.execute(tc.function.name, args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+        return messages

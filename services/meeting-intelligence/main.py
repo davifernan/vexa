@@ -24,6 +24,7 @@ from actions.vexa_client import VexaClient
 from agents.watcher import Watcher
 from agents.quick_ack import QuickAck
 from agents.deep_agent import DeepAgent
+from tools.meeting_tools import create_meeting_tools
 
 # Logging
 logging.basicConfig(
@@ -56,6 +57,15 @@ class MeetingSession:
         # Actions
         self.action_queue = ActionQueue(vexa_client)
 
+        # Tools — defined once, converted to any provider format
+        self.tool_dispenser = create_meeting_tools(
+            shared_state=self.shared_state,
+            transcript_manager=self.transcript_manager,
+            vexa_client=vexa_client,
+            platform=platform,
+            native_meeting_id=meeting_id,
+        )
+
         # Agents — each gets the right LLM provider for their role
         self.quick_ack = QuickAck(
             llm=llm_providers["quick"],
@@ -65,6 +75,7 @@ class MeetingSession:
         )
         self.deep_agent = DeepAgent(
             llm=llm_providers["deep"],
+            tool_dispenser=self.tool_dispenser,
             shared_state=self.shared_state,
             transcript_manager=self.transcript_manager,
             action_queue=self.action_queue,

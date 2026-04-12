@@ -20,6 +20,7 @@ from agents.watcher import Watcher
 from agents.quick_ack import QuickAck
 from agents.deep_agent import DeepAgent
 from llm.provider import create_provider_stack
+from tools.meeting_tools import create_meeting_tools
 
 logger = logging.getLogger("test")
 
@@ -128,9 +129,18 @@ class TestMeetingSession:
         )
 
         # Actions (mock — collect instead of execute)
-        mock_vexa = MockVexaClient()
-        self.action_queue = ActionQueue(mock_vexa)
+        self._mock_vexa = MockVexaClient()
+        self.action_queue = ActionQueue(self._mock_vexa)
         self.collector = ActionCollector(self.action_queue)
+
+        # Tools — defined once, auto-converted per provider
+        self.tool_dispenser = create_meeting_tools(
+            shared_state=self.shared_state,
+            transcript_manager=self.transcript_manager,
+            vexa_client=self._mock_vexa,
+            platform=self.platform,
+            native_meeting_id=self.meeting_id,
+        )
 
         # Agents
         self.quick_ack = QuickAck(
@@ -142,6 +152,7 @@ class TestMeetingSession:
 
         self.deep_agent = DeepAgent(
             llm=self.llm_providers["deep"],
+            tool_dispenser=self.tool_dispenser,
             shared_state=self.shared_state,
             transcript_manager=self.transcript_manager,
             action_queue=self.action_queue,
