@@ -9,14 +9,15 @@ DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
 DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE", "multi")
 
 # --- LLM ---
+# Provider mode: "subscription" uses Claude CLI/Max ($0), "api" uses API keys
+# IMPORTANT: subscription mode is for INTERNAL USE ONLY.
+# For a premium product, switch to "api" mode with proper billing.
+LLM_MODE = os.getenv("LLM_MODE", "auto")  # auto | subscription | api
+
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# Quick-Ack model (fastest TTFT)
-QUICK_ACK_PROVIDER = os.getenv("QUICK_ACK_PROVIDER", "anthropic")  # anthropic | openai
-QUICK_ACK_MODEL = os.getenv("QUICK_ACK_MODEL", "claude-haiku-4-5")
-
-# Deep Agent model
+# Deep Agent model (for API mode)
 DEEP_AGENT_MODEL = os.getenv("DEEP_AGENT_MODEL", "claude-sonnet-4-6")
 DEEP_AGENT_INTERVAL_S = int(os.getenv("DEEP_AGENT_INTERVAL_S", "120"))  # 2 min
 

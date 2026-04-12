@@ -10,9 +10,8 @@ import logging
 import time
 from typing import Optional
 
-import anthropic
-
 import config
+from llm.provider import LLMProvider
 from state.shared_state import SharedState
 from state.transcript_manager import TranscriptManager
 from actions.queue import ActionQueue, ChatAction, SpeakAction, ScreenAction
@@ -105,18 +104,19 @@ class DeepAgent:
 
     def __init__(
         self,
+        llm: LLMProvider,
         shared_state: SharedState,
         transcript_manager: TranscriptManager,
         action_queue: ActionQueue,
         platform: str,
         meeting_id: str,
     ):
+        self.llm = llm
         self.state = shared_state
         self.transcript = transcript_manager
         self.action_queue = action_queue
         self.platform = platform
         self.meeting_id = meeting_id
-        self._client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
         self._running = False
         self._busy = False
 
@@ -166,24 +166,25 @@ class DeepAgent:
 
             # Agentic loop — multiple turns if tool calls needed
             for turn in range(10):  # max 10 turns
-                response = await self._client.messages.create(
-                    model=config.DEEP_AGENT_MODEL,
-                    max_tokens=2000,
+                response = await self.llm.generate_with_tools(
                     system=SYSTEM_PROMPT,
                     messages=messages,
                     tools=TOOLS,
+                    max_tokens=2000,
                 )
 
                 # Process response
-                if response.stop_reason == "tool_use":
+                if response.get("stop_reason") == "tool_use":
                     tool_results = await self._execute_tool_calls(response)
-                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append({"role": "assistant", "content": response["content"]})
                     messages.append({"role": "user", "content": tool_results})
                 else:
                     # Final text response (if any)
-                    for block in response.content:
-                        if hasattr(block, "text") and block.text:
-                            logger.info(f"Deep agent final: {block.text[:100]}")
+                    content = response.get("content", [])
+                    for block in (content if isinstance(content, list) else [content]):
+                        text = getattr(block, "text", None) or (block if isinstance(block, str) else None)
+                        if text:
+                            logger.info(f"Deep agent final: {str(text)[:100]}")
                     break
 
         except Exception as e:

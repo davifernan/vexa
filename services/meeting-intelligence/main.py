@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 import config
+from llm.provider import create_provider_stack
 from stt.deepgram_provider import DeepgramProvider
 from state.shared_state import SharedState
 from state.transcript_manager import TranscriptManager
@@ -39,10 +40,12 @@ active_sessions: dict[str, "MeetingSession"] = {}
 class MeetingSession:
     """All agents and state for one active meeting."""
 
-    def __init__(self, meeting_id: str, platform: str, redis_client, vexa_client: VexaClient):
+    def __init__(self, meeting_id: str, platform: str, redis_client,
+                 vexa_client: VexaClient, llm_providers: dict):
         self.meeting_id = meeting_id
         self.platform = platform
         self.redis = redis_client
+        self._llm_providers = llm_providers
 
         # State
         self.shared_state = SharedState(redis_client, meeting_id)
@@ -53,11 +56,20 @@ class MeetingSession:
         # Actions
         self.action_queue = ActionQueue(vexa_client)
 
-        # Agents
-        self.quick_ack = QuickAck(self.action_queue, platform, meeting_id)
+        # Agents — each gets the right LLM provider for their role
+        self.quick_ack = QuickAck(
+            llm=llm_providers["quick"],
+            action_queue=self.action_queue,
+            platform=platform,
+            meeting_id=meeting_id,
+        )
         self.deep_agent = DeepAgent(
-            self.shared_state, self.transcript_manager,
-            self.action_queue, platform, meeting_id,
+            llm=llm_providers["deep"],
+            shared_state=self.shared_state,
+            transcript_manager=self.transcript_manager,
+            action_queue=self.action_queue,
+            platform=platform,
+            meeting_id=meeting_id,
         )
         self.watcher = Watcher(
             keywords=config.TRIGGER_KEYWORDS,
@@ -192,16 +204,18 @@ class MeetingSession:
                 logger.error(f"Summarizer error: {e}")
 
     async def _summarize_text(self, text: str) -> str:
-        """Use a cheap LLM to summarize a block of transcript."""
-        import anthropic as anth
-        client = anth.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
-        resp = await client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=200,
+        """Use the cheapest available LLM to summarize a block of transcript."""
+        # Uses whatever provider is configured for summarization
+        # (Claude CLI/Max = $0, or Haiku API, or GPT-4o-mini)
+        summarizer = self._llm_providers.get("summarizer")
+        if not summarizer:
+            return text[:200] + "..."
+        resp = await summarizer.generate(
             system="Fasse das folgende Meeting-Transkript in 2-3 Saetzen zusammen. Deutsch, sachlich.",
-            messages=[{"role": "user", "content": text}],
+            prompt=text,
+            max_tokens=200,
         )
-        return resp.content[0].text.strip()
+        return resp.text
 
     async def send_audio(self, chunk: bytes) -> None:
         """Send audio chunk to STT provider (if direct audio mode)."""
@@ -217,6 +231,7 @@ async def lifespan(app: FastAPI):
     app.state.redis = aioredis.from_url(config.REDIS_URL, decode_responses=False)
     app.state.vexa = VexaClient(config.VEXA_API_URL, config.VEXA_API_KEY)
     await app.state.vexa.startup()
+    app.state.llm_providers = create_provider_stack()
     logger.info("Meeting Intelligence Service started")
     yield
     # Shutdown
@@ -251,6 +266,7 @@ async def start_session(req: StartSessionRequest):
         platform=req.platform,
         redis_client=app.state.redis,
         vexa_client=app.state.vexa,
+        llm_providers=app.state.llm_providers,
     )
     await session.start()
     active_sessions[req.meeting_id] = session
