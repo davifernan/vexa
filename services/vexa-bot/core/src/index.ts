@@ -26,6 +26,7 @@ import { ensureBrowserDataDir, syncBrowserDataFromS3, syncBrowserDataToS3, clean
 import { TranscriptionClient } from './services/transcription-client';
 import { SegmentPublisher } from './services/segment-publisher';
 import { SpeakerStreamManager } from './services/speaker-streams';
+import { DeepgramStreamClient } from './services/deepgram-stream';
 import { resolveSpeakerName, clearSpeakerNameCache, isTrackLocked, isNameTaken, reportTrackAudio, getLockedMapping } from './services/speaker-identity';
 import { SileroVAD } from './services/vad';
 import { isHallucination } from './services/hallucination-filter';
@@ -40,6 +41,10 @@ let currentConnectionId: string | null = null;
 let meetingApiCallbackUrl: string | null = null; // ADDED: To store callback URL
 let currentPlatform: "google_meet" | "zoom" | "teams" | undefined;
 let page: Page | null = null; // Initialize page, will be set in runBot
+
+// Deepgram streaming mode — per-speaker WebSocket clients
+const deepgramClients: Map<string, DeepgramStreamClient> = new Map();
+let deepgramMode: boolean = false;
 
 // --- ADDED: Flag to prevent multiple shutdowns ---
 let isShuttingDown = false;
@@ -1158,13 +1163,24 @@ async function initPerSpeakerPipeline(botConfig: BotConfig): Promise<boolean> {
   const meetingId = botConfig.meeting_id;
 
   try {
+    // Check for Deepgram streaming mode
+    const sttMode = process.env.STT_MODE || 'batch';
+    if (sttMode === 'deepgram' && process.env.DEEPGRAM_API_KEY) {
+      deepgramMode = true;
+      log(`[PerSpeaker] 🎙️ DEEPGRAM STREAMING MODE — audio goes directly to Deepgram WebSocket`);
+      log(`[PerSpeaker] Model: ${process.env.DEEPGRAM_MODEL || 'nova-3'}, Language: ${process.env.DEEPGRAM_LANGUAGE || 'de'}`);
+    } else {
+      deepgramMode = false;
+      log('[PerSpeaker] Batch mode (Whisper HTTP)');
+    }
+
     transcriptionClient = new TranscriptionClient({
       serviceUrl: transcriptionServiceUrl,
       apiToken: botConfig.transcriptionServiceToken || process.env.TRANSCRIPTION_SERVICE_TOKEN,
       maxSpeechDurationSec: process.env.MAX_SPEECH_DURATION_SEC ? parseFloat(process.env.MAX_SPEECH_DURATION_SEC) : undefined,
       minSilenceDurationMs: process.env.MIN_SILENCE_DURATION_MS ? parseInt(process.env.MIN_SILENCE_DURATION_MS) : 100,
     });
-    log('[PerSpeaker] TranscriptionClient created');
+    log('[PerSpeaker] TranscriptionClient created (batch fallback)');
 
     segmentPublisher = new SegmentPublisher({
       redisUrl: botConfig.redisUrl || process.env.REDIS_URL || 'redis://localhost:6379',
@@ -1650,6 +1666,52 @@ async function handlePerSpeakerAudioData(speakerIndex: number, audioDataArray: n
     rawCaptureService.feedAudio(speakerIndex, audioData, resolvedName);
   }
 
+  // === Deepgram streaming mode: send audio directly via WebSocket ===
+  if (deepgramMode) {
+    const dgKey = process.env.DEEPGRAM_API_KEY || '';
+    if (dgKey && segmentPublisher) {
+      let dgClient = deepgramClients.get(speakerId);
+      if (!dgClient) {
+        const speakerName = speakerManager.getSpeakerName(speakerId) || speakerId;
+        dgClient = new DeepgramStreamClient(speakerId, speakerName, {
+          apiKey: dgKey,
+          model: process.env.DEEPGRAM_MODEL || 'nova-3',
+          language: currentLanguage || process.env.DEEPGRAM_LANGUAGE || 'de',
+          sampleRate: 16000,
+        });
+        dgClient.setOnSegment(async (segment) => {
+          if (!segmentPublisher) return;
+          // Publish via the same SegmentPublisher the batch pipeline uses
+          // → Redis XADD + PUBLISH → Dashboard + Meeting Intelligence see it
+          await segmentPublisher.publishSegment({
+            speaker: segment.speaker,
+            text: segment.text,
+            start: segment.start,
+            end: segment.end,
+            language: currentLanguage || 'de',
+            completed: segment.isFinal,
+            segment_id: `${speakerId}:dg:${Date.now()}`,
+          });
+          if (segment.isFinal) {
+            log(`[Deepgram] [📝 LIVE] ${segment.speaker}: "${segment.text}"`);
+          }
+        });
+        try {
+          await dgClient.connect();
+          deepgramClients.set(speakerId, dgClient);
+          log(`[Deepgram] Streaming client created for "${speakerName}"`);
+        } catch (err: any) {
+          log(`[Deepgram] Failed to connect for ${speakerId}: ${err.message}`);
+        }
+      }
+      if (dgClient) {
+        dgClient.sendAudio(audioData);
+      }
+    }
+    return; // Skip batch pipeline
+  }
+
+  // === Batch mode (default): buffer and submit to Whisper ===
   speakerManager.feedAudio(speakerId, audioData);
 }
 
