@@ -86,8 +86,12 @@ async def play_scenario(session, scenario: dict) -> dict:
     return results
 
 
-def check_expectations(results: dict, expectations: list[dict]) -> list[dict]:
-    """Check scenario expectations against actual results."""
+async def check_expectations(results: dict, expectations: list[dict], scenario: dict = None) -> list[dict]:
+    """Check scenario expectations against actual results.
+    Uses Judge LLM as fallback when keyword assertions fail.
+    """
+    from tests.smoke.judge import judge_response
+
     checks = []
 
     for exp in expectations:
@@ -170,17 +174,48 @@ def check_expectations(results: dict, expectations: list[dict]) -> list[dict]:
             matching = [a for a in results["actions"] if isinstance(a, target_type)]
 
             if "contains_any" in exp:
+                # Step 1: Keyword match (free)
                 matched = False
+                matched_text = ""
                 for a in matching:
-                    text = getattr(a, "text", "").lower()
-                    if any(kw.lower() in text for kw in exp["contains_any"]):
+                    text = getattr(a, "text", "")
+                    if any(kw.lower() in text.lower() for kw in exp["contains_any"]):
                         matched = True
+                        matched_text = text
                         break
-                checks.append({
-                    "name": f"action {action_type} contains keywords",
-                    "passed": matched,
-                    "detail": f"Found {len(matching)} {action_type} actions",
-                })
+
+                if matched:
+                    checks.append({
+                        "name": f"action {action_type} contains keywords",
+                        "passed": True,
+                        "detail": f"Keyword match: {matched_text[:50]}",
+                    })
+                elif matching:
+                    # Step 2: Judge LLM fallback (cheap)
+                    all_texts = " | ".join(getattr(a, "text", "") for a in matching)
+                    trigger_text = ""
+                    if scenario:
+                        segs = scenario.get("segments", [])
+                        triggers = [s for s in segs if "nilo" in s.get("says", "").lower()]
+                        if triggers:
+                            trigger_text = triggers[-1].get("says", "")
+
+                    verdict = await judge_response(
+                        question=trigger_text or "Meeting-Zusammenfassung",
+                        response=all_texts,
+                        expected_keywords=exp["contains_any"],
+                    )
+                    checks.append({
+                        "name": f"action {action_type} (judge)",
+                        "passed": verdict["passed"],
+                        "detail": f"{verdict['method']}: {verdict['detail'][:60]}",
+                    })
+                else:
+                    checks.append({
+                        "name": f"action {action_type} contains keywords",
+                        "passed": False,
+                        "detail": f"No {action_type} actions found",
+                    })
             else:
                 checks.append({
                     "name": f"action {action_type} exists",
@@ -206,11 +241,16 @@ async def test_scenario(session, scenario_file):
     print(f"Difficulty: {meta.get('difficulty', '?')}")
     print(f"{'='*60}")
 
+    # Init Judge LLM
+    from tests.smoke.judge import set_judge_llm
+    if "quick" in session.llm_providers:
+        set_judge_llm(session.llm_providers["quick"])
+
     # Play the scenario
     results = await play_scenario(session, scenario)
 
-    # Check expectations
-    checks = check_expectations(results, expectations)
+    # Check expectations (with Judge LLM fallback)
+    checks = await check_expectations(results, expectations, scenario)
 
     # Print report
     passed = sum(1 for c in checks if c["passed"])

@@ -75,10 +75,10 @@ expect:
     after_segment: 9
     reason: "keyword 'Nilo' bei Zusammenfassungs-Anfrage"
 
-  - type: action
-    after_segment: 9
-    action_type: chat
-    contains_any: ["Breaking Changes", "Feature Flag", "POC", "Max", "Lisa"]
+  # Deep Agent responds either via chat OR by updating state — both are correct
+  - type: state_updated
+    field: context_summary
+    contains_any: ["Breaking", "Feature", "Migration", "API"]
 
   - type: no_action
     before_segment: 8

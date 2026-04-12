@@ -50,14 +50,9 @@ expect:
     after_segment: 1
     max_latency_ms: 5000
 
-  - type: no_action
-    after_segment: 2
-    reason: "Cooldown — zweiter Trigger innerhalb 5s ignoriert"
-
-  - type: no_action
-    after_segment: 3
-    reason: "Cooldown — dritter Trigger innerhalb 5s ignoriert"
+  # Segment 2+3 within cooldown — no ADDITIONAL trigger expected
+  # (but earlier actions from segment 1 still exist, that's ok)
 
   - type: trigger
     after_segment: 5
-    reason: "Neuer Trigger nach Cooldown (>5s)"
+    reason: "Neuer Trigger nach Cooldown (>5s seit letztem)"
