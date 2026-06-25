@@ -953,6 +953,20 @@ async def request_bot(
     if raw_capture:
         env_vars["RAW_CAPTURE"] = raw_capture
 
+    # Deepgram streaming mode
+    stt_mode = os.getenv("STT_MODE", "").strip()
+    if stt_mode:
+        env_vars["STT_MODE"] = stt_mode
+    dg_key = os.getenv("DEEPGRAM_API_KEY", "").strip()
+    if dg_key:
+        env_vars["DEEPGRAM_API_KEY"] = dg_key
+    dg_model = os.getenv("DEEPGRAM_MODEL", "").strip()
+    if dg_model:
+        env_vars["DEEPGRAM_MODEL"] = dg_model
+    dg_lang = os.getenv("DEEPGRAM_LANGUAGE", "").strip()
+    if dg_lang:
+        env_vars["DEEPGRAM_LANGUAGE"] = dg_lang
+
     # Zoom credentials
     if req.platform.value == "zoom":
         if os.getenv("ZOOM_WEB", "").strip() == "true":

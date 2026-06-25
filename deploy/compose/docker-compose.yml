@@ -264,6 +264,11 @@ services:
       - TRANSCRIPTION_GATEWAY_URL=${TRANSCRIPTION_GATEWAY_URL:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Deepgram streaming mode
+      - STT_MODE=${STT_MODE:-batch}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - DEEPGRAM_MODEL=${DEEPGRAM_MODEL:-nova-3}
+      - DEEPGRAM_LANGUAGE=${DEEPGRAM_LANGUAGE:-de}
     volumes:
       - ${LOCAL_STORAGE_VOLUME_SOURCE:-recordings-data}:/data/recordings
     init: true
@@ -333,6 +338,11 @@ services:
       - VEXA_ADMIN_API_URL=http://admin-api:8001
       - JWT_SECRET=${JWT_SECRET:-vexa-dev-jwt-secret}
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - ALLOWED_EMAIL=${ALLOWED_EMAIL:-}
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-}
+      - NEXTAUTH_SECRET=${JWT_SECRET:-vexa-dev-jwt-secret}
     init: true
     depends_on:
       - api-gateway

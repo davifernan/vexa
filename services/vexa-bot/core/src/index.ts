@@ -44,6 +44,7 @@ let page: Page | null = null; // Initialize page, will be set in runBot
 
 // Deepgram streaming mode — per-speaker WebSocket clients
 const deepgramClients: Map<string, DeepgramStreamClient> = new Map();
+const deepgramConnecting: Set<string> = new Set();  // Lock to prevent duplicate connects
 let deepgramMode: boolean = false;
 
 // --- ADDED: Flag to prevent multiple shutdowns ---
@@ -1671,7 +1672,8 @@ async function handlePerSpeakerAudioData(speakerIndex: number, audioDataArray: n
     const dgKey = process.env.DEEPGRAM_API_KEY || '';
     if (dgKey && segmentPublisher) {
       let dgClient = deepgramClients.get(speakerId);
-      if (!dgClient) {
+      if (!dgClient && !deepgramConnecting.has(speakerId)) {
+        deepgramConnecting.add(speakerId);  // Lock — prevent duplicate connects
         const speakerName = speakerManager.getSpeakerName(speakerId) || speakerId;
         dgClient = new DeepgramStreamClient(speakerId, speakerName, {
           apiKey: dgKey,
@@ -1679,31 +1681,66 @@ async function handlePerSpeakerAudioData(speakerIndex: number, audioDataArray: n
           language: currentLanguage || process.env.DEEPGRAM_LANGUAGE || 'de',
           sampleRate: 16000,
         });
+        // Track confirmed segments per speaker for publishTranscript bundles
+        const dgConfirmedSegments: import('./services/segment-publisher').TranscriptionSegment[] = [];
+        let dgPendingText = '';
+
         dgClient.setOnSegment(async (segment) => {
           if (!segmentPublisher) return;
-          // Publish via the same SegmentPublisher the batch pipeline uses
-          // → Redis XADD + PUBLISH → Dashboard + Meeting Intelligence see it
-          await segmentPublisher.publishSegment({
-            speaker: segment.speaker,
-            text: segment.text,
-            start: segment.start,
-            end: segment.end,
-            language: currentLanguage || 'de',
-            completed: segment.isFinal,
-            segment_id: `${speakerId}:dg:${Date.now()}`,
-          });
-          if (segment.isFinal) {
-            log(`[Deepgram] [📝 LIVE] ${segment.speaker}: "${segment.text}"`);
+          try {
+            const resolvedName = speakerManager?.getSpeakerName(speakerId) || segment.speaker || speakerId;
+            // Dashboard requires absolute_start_time (ISO string) to display segments!
+            const now = new Date();
+            const absStart = new Date(now.getTime() - (segment.end - segment.start) * 1000).toISOString();
+            const absEnd = now.toISOString();
+            const segData: import('./services/segment-publisher').TranscriptionSegment = {
+              speaker: resolvedName,
+              text: segment.text,
+              start: segment.start,
+              end: segment.end,
+              language: currentLanguage || 'de',
+              completed: segment.isFinal,
+              segment_id: `${speakerId}:dg:${Date.now()}`,
+              source: 'audio',
+              absolute_start_time: absStart,
+              absolute_end_time: absEnd,
+            };
+
+            if (segment.isFinal) {
+              dgConfirmedSegments.push(segData);
+              dgPendingText = '';
+              // publishTranscript → XADD (DB) + tc:meeting:X:mutable (live dashboard!)
+              await segmentPublisher.publishTranscript(
+                resolvedName,
+                [segData],  // confirmed
+                [],         // no pending
+              );
+              log(`[Deepgram] [📝 LIVE] ${resolvedName}: "${segment.text}"`);
+            } else {
+              // Interim → show as pending (live typing effect in dashboard)
+              dgPendingText = segment.text;
+              await segmentPublisher.publishTranscript(
+                resolvedName,
+                [],           // no new confirmed
+                [segData],    // pending (interim)
+              );
+            }
+          } catch (err: any) {
+            log(`[Deepgram] Publish error: ${err.message}`);
           }
         });
         try {
           await dgClient.connect();
           deepgramClients.set(speakerId, dgClient);
-          log(`[Deepgram] Streaming client created for "${speakerName}"`);
+          deepgramConnecting.delete(speakerId);
+          log(`[Deepgram] ✅ Connected and streaming for "${speakerName}"`);
         } catch (err: any) {
-          log(`[Deepgram] Failed to connect for ${speakerId}: ${err.message}`);
+          deepgramConnecting.delete(speakerId);
+          log(`[Deepgram] ❌ Failed to connect for ${speakerId}: ${err.message}`);
         }
       }
+      // Re-fetch after possible connect
+      dgClient = deepgramClients.get(speakerId);
       if (dgClient) {
         dgClient.sendAudio(audioData);
       }
